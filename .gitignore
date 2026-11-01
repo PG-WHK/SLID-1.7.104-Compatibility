@@ -1,0 +1,8 @@
+build*/
+.vs/
+*.dll
+*.pdb
+*.lib
+*.exe
+*.zip
+CMakeUserPresets.json

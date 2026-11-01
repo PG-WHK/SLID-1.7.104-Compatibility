@@ -1,0 +1,652 @@
+--- a/src/ActivationHook.cpp
++++ b/src/ActivationHook.cpp
+@@ -174,6 +174,7 @@
+             // write directly to the refAliasMap (the runtime storage GetReference reads).
+             if (quest) {
+                 auto handle = a_actor->GetHandle();
++                RE::BSWriteLockGuard locker(quest->aliasAccessLock);
+                 quest->refAliasMap.erase(0);
+                 quest->refAliasMap.insert({0, handle});
+             }
+@@ -197,9 +198,9 @@
+                         if (moved > 0) {
+                             Feedback::OnWhoosh();
+                             std::string msg = TF("$SLID_NotifyWhooshed", std::to_string(moved));
+-                            RE::DebugNotification(msg.c_str());
++                            RE::SendHUDMessage::ShowHUDMessage(msg.c_str());
+                         } else {
+-                            RE::DebugNotification(T("$SLID_NothingToWhoosh").c_str());
++                            RE::SendHUDMessage::ShowHUDMessage(T("$SLID_NothingToWhoosh").c_str());
+                         }
+                     });
+                 return;
+@@ -209,9 +210,9 @@
+             if (moved > 0) {
+                 Feedback::OnWhoosh();
+                 std::string msg = TF("$SLID_NotifyWhooshed", std::to_string(moved));
+-                RE::DebugNotification(msg.c_str());
++                RE::SendHUDMessage::ShowHUDMessage(msg.c_str());
+             } else {
+-                RE::DebugNotification(T("$SLID_NothingToWhoosh").c_str());
++                RE::SendHUDMessage::ShowHUDMessage(T("$SLID_NothingToWhoosh").c_str());
+             }
+         }
+ 
+@@ -333,6 +334,16 @@
+         // TESObjectREFR::ActivateRef — SE 19369, AE 19796
+         auto addr = REL::RelocationID(19369, 19796).address();
+ 
++        // Verified against Steam 1.7.104.0. Fail closed if a different build or
++        // an earlier plugin has replaced this function's entry point.
++        constexpr std::array<std::uint8_t, 11> expected{
++            0x48, 0x8B, 0xC4, 0x4C, 0x89, 0x48, 0x20, 0x44, 0x88, 0x40, 0x18
++        };
++        if (std::memcmp(reinterpret_cast<const void*>(addr), expected.data(), expected.size()) != 0) {
++            logger::critical("ActivateRef entry differs from verified 1.7.104 bytes; no hook installed");
++            return false;
++        }
++
+         if (MH_CreateHook(reinterpret_cast<void*>(addr),
+                           reinterpret_cast<void*>(&Hook_ActivateRef),
+                           reinterpret_cast<void**>(&_originalActivateRef)) != MH_OK) {
+@@ -340,7 +351,7 @@
+             return false;
+         }
+ 
+-        if (MH_EnableHook(MH_ALL_HOOKS) != MH_OK) {
++        if (MH_EnableHook(reinterpret_cast<void*>(addr)) != MH_OK) {
+             logger::critical("Failed to enable hooks");
+             return false;
+         }
+--- a/src/ConsoleCommands.cpp
++++ b/src/ConsoleCommands.cpp
+@@ -26,23 +26,7 @@
+ 
+ #include <random>
+ 
+-// TESTopicInfoEvent is forward-declared in CommonLibSSE-NG but never defined.
+-// Layout from powerof3/CommonLibSSE (dev branch).
+-namespace RE {
+-    namespace REFREventCallbacks {
+-        class IEventCallback;
+-    }
+-
+-    struct TESTopicInfoEvent {
+-        BSTSmartPointer<REFREventCallbacks::IEventCallback> callback;         // 00
+-        NiPointer<TESObjectREFR>                            speakerRef;       // 08
+-        FormID                                              topicInfoFormID;  // 10
+-        std::uint32_t                                       type;             // 14 (0=begin, 1=end)
+-        std::uint16_t                                       stage;            // 18
+-    };
+-    static_assert(sizeof(TESTopicInfoEvent) == 0x20);
+-}
+-
++// TESTopicInfoEvent uses the ported CommonLib definition.
+ namespace ConsoleCommands {
+ 
+     namespace {
+@@ -139,7 +123,7 @@
+                 RE::BSTEventSource<RE::TESTopicInfoEvent>*) override {
+ 
+                 if (!a_event) return RE::BSEventNotifyControl::kContinue;
+-                if (a_event->type != 0) return RE::BSEventNotifyControl::kContinue;
++                if (a_event->type != RE::TESTopicInfoEvent::TopicInfoEventType::kTopicBegin) return RE::BSEventNotifyControl::kContinue;
+ 
+                 if (a_event->topicInfoFormID == g_vendorAcceptInfoID && g_vendorAcceptInfoID != 0) {
+                     logger::info("TopicInfoEvent: matched SLID_VendorAccept ({:08X})", g_vendorAcceptInfoID);
+@@ -193,7 +177,7 @@
+                             }
+ 
+                             std::string msg = TF("$SLID_NotifyNetworkCreated", finalName);
+-                            RE::DebugNotification(msg.c_str());
++                            RE::SendHUDMessage::ShowHUDMessage(msg.c_str());
+ 
+                             logger::info("SetMasterAuto: created network '{}' with master {:08X}",
+                                          finalName, formID);
+@@ -215,14 +199,14 @@
+             auto* ref = GetCapturedTarget();
+             if (!ref) {
+                 logger::error("SetMasterAuto: no crosshair target");
+-                RE::DebugNotification(T("$SLID_ErrNoTarget").c_str());
++                RE::SendHUDMessage::ShowHUDMessage(T("$SLID_ErrNoTarget").c_str());
+                 Feedback::OnError();
+                 return "";
+             }
+ 
+             if (ref->As<RE::Actor>()) {
+                 logger::warn("SetMasterAuto: target {:08X} is an actor, not a container", ref->GetFormID());
+-                RE::DebugNotification(T("$SLID_ErrNoTarget").c_str());
++                RE::SendHUDMessage::ShowHUDMessage(T("$SLID_ErrNoTarget").c_str());
+                 Feedback::OnError();
+                 return "";
+             }
+@@ -230,7 +214,7 @@
+             if (!ref->GetContainer()) {
+                 logger::error("SetMasterAuto: target {:08X} ({}) is not a container",
+                              ref->GetFormID(), ref->GetName());
+-                RE::DebugNotification(T("$SLID_ErrNoTarget").c_str());
++                RE::SendHUDMessage::ShowHUDMessage(T("$SLID_ErrNoTarget").c_str());
+                 Feedback::OnError();
+                 return "";
+             }
+@@ -240,7 +224,7 @@
+             // Cannot designate a sell container as master
+             if (mgr->GetSellContainerFormID() == ref->GetFormID()) {
+                 logger::warn("SetMasterAuto: target {:08X} is already the sell container", ref->GetFormID());
+-                RE::DebugNotification(T("$SLID_ErrSellAsMaster").c_str());
++                RE::SendHUDMessage::ShowHUDMessage(T("$SLID_ErrSellAsMaster").c_str());
+                 Feedback::OnError();
+                 return "";
+             }
+@@ -284,13 +268,13 @@
+         void BeginTagContainer(RE::StaticFunctionTag*) {
+             auto* ref = GetCapturedTarget();
+             if (!ref || ref->As<RE::Actor>()) {
+-                RE::DebugNotification(T("$SLID_ErrNoTarget").c_str());
++                RE::SendHUDMessage::ShowHUDMessage(T("$SLID_ErrNoTarget").c_str());
+                 Feedback::OnError();
+                 return;
+             }
+ 
+             if (!ref->GetContainer()) {
+-                RE::DebugNotification(T("$SLID_ErrNotContainer").c_str());
++                RE::SendHUDMessage::ShowHUDMessage(T("$SLID_ErrNotContainer").c_str());
+                 Feedback::OnError();
+                 return;
+             }
+@@ -301,7 +285,7 @@
+             // Check if already a master
+             auto masterNet = mgr->FindNetworkByMaster(formID);
+             if (!masterNet.empty()) {
+-                RE::DebugNotification(T("$SLID_ErrCannotTagMaster").c_str());
++                RE::SendHUDMessage::ShowHUDMessage(T("$SLID_ErrCannotTagMaster").c_str());
+                 Feedback::OnError();
+                 return;
+             }
+@@ -332,7 +316,7 @@
+         void BeginDeregister(RE::StaticFunctionTag*) {
+             auto* ref = GetCapturedTarget();
+             if (!ref || ref->As<RE::Actor>()) {
+-                RE::DebugNotification(T("$SLID_ErrNoTarget").c_str());
++                RE::SendHUDMessage::ShowHUDMessage(T("$SLID_ErrNoTarget").c_str());
+                 Feedback::OnError();
+                 return;
+             }
+@@ -353,13 +337,13 @@
+                 auto tagName = mgr->GetTagName(formID);
+                 mgr->UntagContainer(formID);
+                 std::string msg = TF("$SLID_NotifyDeregistered", tagName);
+-                RE::DebugNotification(msg.c_str());
++                RE::SendHUDMessage::ShowHUDMessage(msg.c_str());
+                 Feedback::OnUntagContainer(ref);
+                 return;
+             }
+ 
+             // Neither master nor tagged
+-            RE::DebugNotification(T("$SLID_ErrNotMasterOrTagged").c_str());
++            RE::SendHUDMessage::ShowHUDMessage(T("$SLID_ErrNotMasterOrTagged").c_str());
+             Feedback::OnError();
+         }
+ 
+@@ -383,7 +367,7 @@
+ 
+             if (!shaderWhite || !shaderBlue) {
+                 logger::error("BeginDetect: shaders not found in ESP");
+-                RE::DebugNotification(T("$SLID_ErrDetectShaders").c_str());
++                RE::SendHUDMessage::ShowHUDMessage(T("$SLID_ErrDetectShaders").c_str());
+                 Feedback::OnError();
+                 return;
+             }
+@@ -500,7 +484,7 @@
+                 summary += ". " + std::to_string(scieContainers.size()) + " SCIE";
+             }
+ 
+-            RE::DebugNotification(summary.c_str());
++            RE::SendHUDMessage::ShowHUDMessage(summary.c_str());
+             Feedback::OnDetectContainers();
+ 
+             logger::info("BeginDetect: {} masters (white), {} others (blue), sell={} (orange), {} available (green), {} total applied",
+@@ -512,13 +496,13 @@
+         void BeginSellContainer(RE::StaticFunctionTag*) {
+             auto* ref = GetCapturedTarget();
+             if (!ref || ref->As<RE::Actor>()) {
+-                RE::DebugNotification(T("$SLID_ErrNoTarget").c_str());
++                RE::SendHUDMessage::ShowHUDMessage(T("$SLID_ErrNoTarget").c_str());
+                 Feedback::OnError();
+                 return;
+             }
+ 
+             if (!ref->GetContainer()) {
+-                RE::DebugNotification(T("$SLID_ErrNotContainer").c_str());
++                RE::SendHUDMessage::ShowHUDMessage(T("$SLID_ErrNotContainer").c_str());
+                 Feedback::OnError();
+                 return;
+             }
+@@ -529,7 +513,7 @@
+             // Cannot designate a master container as sell container
+             auto masterNet = mgr->FindNetworkByMaster(formID);
+             if (!masterNet.empty()) {
+-                RE::DebugNotification(T("$SLID_ErrMasterAsSell").c_str());
++                RE::SendHUDMessage::ShowHUDMessage(T("$SLID_ErrMasterAsSell").c_str());
+                 Feedback::OnError();
+                 return;
+             }
+@@ -537,14 +521,14 @@
+             // Toggle: if already the sell container, clear it
+             if (mgr->GetSellContainerFormID() == formID) {
+                 mgr->ClearSellContainer();
+-                RE::DebugNotification(T("$SLID_NotifySellRemoved").c_str());
++                RE::SendHUDMessage::ShowHUDMessage(T("$SLID_NotifySellRemoved").c_str());
+                 Feedback::OnClearSellContainer(ref);
+                 return;
+             }
+ 
+             // Block if a different sell container already exists — must clear first
+             if (mgr->HasSellContainer()) {
+-                RE::DebugNotification(T("$SLID_ErrSellAlreadySet").c_str());
++                RE::SendHUDMessage::ShowHUDMessage(T("$SLID_ErrSellAlreadySet").c_str());
+                 Feedback::OnError();
+                 return;
+             }
+@@ -558,7 +542,7 @@
+ 
+             DisplayName::Apply(formID);
+ 
+-            RE::DebugNotification(T("$SLID_NotifySellDesignated").c_str());
++            RE::SendHUDMessage::ShowHUDMessage(T("$SLID_NotifySellDesignated").c_str());
+             Feedback::OnSetSellContainer(ref);
+ 
+         }
+@@ -656,7 +640,7 @@
+             }
+ 
+             std::string msg = TF("$SLID_NotifyVendorEstablished", vendorName);
+-            RE::DebugNotification(msg.c_str());
++            RE::SendHUDMessage::ShowHUDMessage(msg.c_str());
+ 
+             // Close dialogue — the transaction is complete
+             if (auto* queue = RE::UIMessageQueue::GetSingleton()) {
+@@ -712,7 +696,7 @@
+             }
+ 
+             std::string msg = TF("$SLID_NotifyVendorCancelled", vendorName);
+-            RE::DebugNotification(msg.c_str());
++            RE::SendHUDMessage::ShowHUDMessage(msg.c_str());
+ 
+             logger::info("OnVendorDialogueCancel: deregistered {} ({:08X}), refunded {} gold",
+                          vendorName, npcBaseID, kRefund);
+@@ -1722,9 +1706,9 @@
+                         bool result = GeneratePresetINI(nullptr, netBS, nameBS);
+                         if (result) {
+                             NetworkManager::GetSingleton()->ReloadPresets();
+-                            RE::DebugNotification(T("$SLID_ExportGenerated").c_str());
++                            RE::SendHUDMessage::ShowHUDMessage(T("$SLID_ExportGenerated").c_str());
+                         } else {
+-                            RE::DebugNotification(T("$SLID_ExportFailed").c_str());
++                            RE::SendHUDMessage::ShowHUDMessage(T("$SLID_ExportFailed").c_str());
+                         }
+                     });
+             };
+@@ -1737,7 +1721,7 @@
+         auto* mgr = NetworkManager::GetSingleton();
+         auto names = mgr->GetNetworkNames();
+         if (names.empty()) {
+-            RE::DebugNotification(T("$SLID_ErrNoNetworks").c_str());
++            RE::SendHUDMessage::ShowHUDMessage(T("$SLID_ErrNoNetworks").c_str());
+             return;
+         }
+         auto networkName = names[0];
+@@ -1825,9 +1809,9 @@
+                     if (moved > 0) {
+                         Feedback::OnWhoosh();
+                         std::string msg = TF("$SLID_NotifyWhooshed", std::to_string(moved));
+-                        RE::DebugNotification(msg.c_str());
++                        RE::SendHUDMessage::ShowHUDMessage(msg.c_str());
+                     } else {
+-                        RE::DebugNotification(T("$SLID_NothingToWhoosh").c_str());
++                        RE::SendHUDMessage::ShowHUDMessage(T("$SLID_NothingToWhoosh").c_str());
+                     }
+                 });
+             return;
+@@ -1837,9 +1821,9 @@
+         if (moved > 0) {
+             Feedback::OnWhoosh();
+             std::string msg = TF("$SLID_NotifyWhooshed", std::to_string(moved));
+-            RE::DebugNotification(msg.c_str());
++            RE::SendHUDMessage::ShowHUDMessage(msg.c_str());
+         } else {
+-            RE::DebugNotification(T("$SLID_NothingToWhoosh").c_str());
++            RE::SendHUDMessage::ShowHUDMessage(T("$SLID_NothingToWhoosh").c_str());
+         }
+     }
+ 
+@@ -1848,14 +1832,14 @@
+         auto result = Distributor::Distribute(a_networkName);
+         Feedback::OnSort();
+         std::string msg = TF("$SLID_NotifySorted", std::to_string(result.totalItems));
+-        RE::DebugNotification(msg.c_str());
++        RE::SendHUDMessage::ShowHUDMessage(msg.c_str());
+     }
+ 
+     /// Sweep (gather all items back to master).
+     void DoSweep(const std::string& a_networkName) {
+         auto gathered = Distributor::GatherToMaster(a_networkName);
+         std::string msg = TF("$SLID_NotifySwept", std::to_string(gathered));
+-        RE::DebugNotification(msg.c_str());
++        RE::SendHUDMessage::ShowHUDMessage(msg.c_str());
+     }
+ 
+     /// Open the config menu for a network.
+@@ -1905,7 +1889,7 @@
+         // Check if it's the sell container
+         if (a_formID == mgr->GetSellContainerFormID()) {
+             mgr->ClearSellContainer();
+-            RE::DebugNotification(T("$SLID_NotifySellRemoved").c_str());
++            RE::SendHUDMessage::ShowHUDMessage(T("$SLID_NotifySellRemoved").c_str());
+             if (ref) Feedback::OnClearSellContainer(ref);
+             return;
+         }
+@@ -1931,11 +1915,11 @@
+                 DisplayName::Clear(a_formID);
+             }
+             std::string msg = TF("$SLID_NotifyDeregistered", tagName);
+-            RE::DebugNotification(msg.c_str());
++            RE::SendHUDMessage::ShowHUDMessage(msg.c_str());
+             if (ref) Feedback::OnUntagContainer(ref);
+         } else {
+             // Not tagged and not a master or sell — nothing to remove
+-            RE::DebugNotification(T("$SLID_ErrNotMasterOrTagged").c_str());
++            RE::SendHUDMessage::ShowHUDMessage(T("$SLID_ErrNotMasterOrTagged").c_str());
+             Feedback::OnError();
+         }
+     }
+@@ -1949,7 +1933,7 @@
+ 
+         // Cannot designate a sell container as master
+         if (mgr->GetSellContainerFormID() == a_formID) {
+-            RE::DebugNotification(T("$SLID_ErrSellAsMaster").c_str());
++            RE::SendHUDMessage::ShowHUDMessage(T("$SLID_ErrSellAsMaster").c_str());
+             Feedback::OnError();
+             return;
+         }
+@@ -2008,7 +1992,7 @@
+                 auto* ref2 = RE::TESForm::LookupByID<RE::TESObjectREFR>(a_formID);
+                 if (ref2) Feedback::OnTagContainer(ref2);
+                 std::string msg = TF("$SLID_NotifyAddedToLink", chosenName, networkName);
+-                RE::DebugNotification(msg.c_str());
++                RE::SendHUDMessage::ShowHUDMessage(msg.c_str());
+             });
+     }
+ 
+@@ -2022,13 +2006,13 @@
+         // Cannot designate a master as sell
+         auto masterNet = mgr->FindNetworkByMaster(a_formID);
+         if (!masterNet.empty()) {
+-            RE::DebugNotification(T("$SLID_ErrMasterAsSell").c_str());
++            RE::SendHUDMessage::ShowHUDMessage(T("$SLID_ErrMasterAsSell").c_str());
+             Feedback::OnError();
+             return;
+         }
+ 
+         if (mgr->HasSellContainer()) {
+-            RE::DebugNotification(T("$SLID_ErrSellAlreadySet").c_str());
++            RE::SendHUDMessage::ShowHUDMessage(T("$SLID_ErrSellAlreadySet").c_str());
+             Feedback::OnError();
+             return;
+         }
+@@ -2041,7 +2025,7 @@
+ 
+         DisplayName::Apply(a_formID);
+ 
+-        RE::DebugNotification(T("$SLID_NotifySellDesignated").c_str());
++        RE::SendHUDMessage::ShowHUDMessage(T("$SLID_NotifySellDesignated").c_str());
+         Feedback::OnSetSellContainer(ref);
+     }
+ 
+@@ -2093,9 +2077,9 @@
+                     auto result = Distributor::Restock(networkName);
+                     if (result.totalItems > 0) {
+                         std::string msg = TF("$SLID_NotifyRestocked", std::to_string(result.totalItems));
+-                        RE::DebugNotification(msg.c_str());
++                        RE::SendHUDMessage::ShowHUDMessage(msg.c_str());
+                     } else {
+-                        RE::DebugNotification(T("$SLID_NothingToRestock").c_str());
++                        RE::SendHUDMessage::ShowHUDMessage(T("$SLID_NothingToRestock").c_str());
+                     }
+                 });
+             return;
+@@ -2104,9 +2088,9 @@
+         auto result = Distributor::Restock(a_networkName);
+         if (result.totalItems > 0) {
+             std::string msg = TF("$SLID_NotifyRestocked", std::to_string(result.totalItems));
+-            RE::DebugNotification(msg.c_str());
++            RE::SendHUDMessage::ShowHUDMessage(msg.c_str());
+         } else {
+-            RE::DebugNotification(T("$SLID_NothingToRestock").c_str());
++            RE::SendHUDMessage::ShowHUDMessage(T("$SLID_NothingToRestock").c_str());
+         }
+     }
+ 
+@@ -2151,7 +2135,7 @@
+         FilterRegistry::GetSingleton()->Reload();
+         TraitEvaluator::Init();
+         TraitEvaluator::ValidateKeywords();
+-        RE::DebugNotification(T("$SLID_FiltersReloaded").c_str());
++        RE::SendHUDMessage::ShowHUDMessage(T("$SLID_FiltersReloaded").c_str());
+         logger::info("Filters reloaded by user request");
+     }
+ 
+@@ -2248,7 +2232,7 @@
+         if (targetFormID != 0) {
+             auto* targetRef = RE::TESForm::LookupByID<RE::TESObjectREFR>(targetFormID);
+             if (targetRef && ContainerUtils::IsNonPersistent(targetRef)) {
+-                RE::DebugNotification(T("$SLID_NonPersistentWarning").c_str());
++                RE::SendHUDMessage::ShowHUDMessage(T("$SLID_NonPersistentWarning").c_str());
+                 return;
+             }
+         }
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -39,8 +39,10 @@
+     v.PluginVersion(REL::Version(Version::MAJOR, Version::MINOR, Version::PATCH, 0));
+     v.PluginName(Version::NAME);
+     v.AuthorName(Version::AUTHOR);
+-    v.UsesAddressLibrary();  // Resolve addresses via Address Library (version-independent)
+-    v.UsesNoStructs();       // Don't depend on game struct layouts
++    // Format-5 Address Library support is declared by the ported CommonLib.
++    // This build accesses game structures and supports exactly this runtime.
++    v.CompatibleVersions({REL::Version(1, 7, 104, 0)});
++    v.MinimumRequiredXSEVersion(REL::Version(2, 3, 1, 0));
+     return v;
+ }();
+ 
+@@ -248,7 +250,7 @@
+                             (result.prunedSell ? ", sell container" : "") +
+                             (vendorsPruned > 0 ? ", " + std::to_string(vendorsPruned) + " vendors" : "") +
+                             " (missing mods?)";
+-                        RE::DebugNotification(msg.c_str());
++                        RE::SendHUDMessage::ShowHUDMessage(msg.c_str());
+                         logger::warn("{}", msg);
+                     }
+                     DisplayName::ApplyAll();
+@@ -312,9 +314,15 @@
+ 
+ // Main load entry point
+ SKSEPluginLoad(const SKSE::LoadInterface* a_skse) {
++    if (!a_skse || a_skse->IsEditor() ||
++        a_skse->RuntimeVersion() != REL::Version(1, 7, 104, 0) ||
++        a_skse->SKSEVersion() < REL::Version(2, 3, 1, 0).pack()) {
++        return false;
++    }
+     SKSE::Init(a_skse);
+ 
+     InitializeLogging();
++    logger::info("Steam 1.7.104 compatibility trial 0.0.1; upstream SLID 1.4.9");
+ 
+     Settings::Load();
+     if (Settings::bDebugLogging) {
+@@ -346,7 +354,7 @@
+ 
+     if (!ActivationHook::Install()) {
+         logger::critical("{} DISABLED - hook installation failed", Version::NAME);
+-        return true;
++        return false;
+     }
+ 
+     logger::info("{} loaded successfully", Version::NAME);
+--- a/src/NetworkManager.cpp
++++ b/src/NetworkManager.cpp
+@@ -1436,7 +1436,7 @@
+         } else {
+             logger::info("ActivatePreset '{}': sell container already set ({:08X}), skipping preset sell ({:08X})",
+                          a_name, GetSellContainerFormID(), preset->resolvedSellFormID);
+-            RE::DebugNotification("SLID: Sell container already set, preset sell skipped.");
++            RE::SendHUDMessage::ShowHUDMessage("SLID: Sell container already set, preset sell skipped.");
+         }
+     }
+ 
+--- a/src/SalesProcessor.cpp
++++ b/src/SalesProcessor.cpp
+@@ -24,7 +24,7 @@
+                 std::string msg = TF("$SLID_NotifySold",
+                                      std::to_string(result.itemsSold),
+                                      std::to_string(result.goldEarned));
+-                RE::DebugNotification(msg.c_str());
++                RE::SendHUDMessage::ShowHUDMessage(msg.c_str());
+                 logger::info("SalesProcessor: {}", msg);
+                 anySold = true;
+             }
+@@ -40,7 +40,7 @@
+                                       vendorCount,
+                                       std::to_string(vendorResult.totalItemsSold),
+                                       std::to_string(vendorResult.totalGoldEarned));
+-                RE::DebugNotification(vmsg.c_str());
++                RE::SendHUDMessage::ShowHUDMessage(vmsg.c_str());
+                 logger::info("SalesProcessor: {}", vmsg);
+                 anySold = true;
+             }
+--- a/src/SLIDMenu.cpp
++++ b/src/SLIDMenu.cpp
+@@ -466,9 +466,9 @@
+ 
+         if (result.totalItems > 0) {
+             std::string msg = TF("$SLID_NotifySorted", std::to_string(result.totalItems));
+-            RE::DebugNotification(msg.c_str());
++            RE::SendHUDMessage::ShowHUDMessage(msg.c_str());
+         } else {
+-            RE::DebugNotification(T("$SLID_NothingToSort").c_str());
++            RE::SendHUDMessage::ShowHUDMessage(T("$SLID_NothingToSort").c_str());
+         }
+     }
+ 
+@@ -514,9 +514,9 @@
+ 
+         if (moved > 0) {
+             std::string msg = TF("$SLID_NotifySwept", std::to_string(moved));
+-            RE::DebugNotification(msg.c_str());
++            RE::SendHUDMessage::ShowHUDMessage(msg.c_str());
+         } else {
+-            RE::DebugNotification(T("$SLID_NothingToSweep").c_str());
++            RE::SendHUDMessage::ShowHUDMessage(T("$SLID_NothingToSweep").c_str());
+         }
+     }
+ 
+@@ -538,9 +538,9 @@
+                 if (moved > 0) {
+                     Feedback::OnWhoosh();
+                     std::string msg = TF("$SLID_NotifyWhooshed", std::to_string(moved));
+-                    RE::DebugNotification(msg.c_str());
++                    RE::SendHUDMessage::ShowHUDMessage(msg.c_str());
+                 } else {
+-                    RE::DebugNotification(T("$SLID_NothingToWhoosh").c_str());
++                    RE::SendHUDMessage::ShowHUDMessage(T("$SLID_NothingToWhoosh").c_str());
+                 }
+ 
+                 BuildStagesFromNetwork();
+@@ -553,9 +553,9 @@
+         if (moved > 0) {
+             Feedback::OnWhoosh();
+             std::string msg = TF("$SLID_NotifyWhooshed", std::to_string(moved));
+-            RE::DebugNotification(msg.c_str());
++            RE::SendHUDMessage::ShowHUDMessage(msg.c_str());
+         } else {
+-            RE::DebugNotification(T("$SLID_NothingToWhoosh").c_str());
++            RE::SendHUDMessage::ShowHUDMessage(T("$SLID_NothingToWhoosh").c_str());
+         }
+ 
+         BuildStagesFromNetwork();
+--- a/src/TagInputMenu.cpp
++++ b/src/TagInputMenu.cpp
+@@ -1109,7 +1109,7 @@
+         std::string msg = s_isRename
+             ? TF("$SLID_NotifyRenamed", a_name)
+             : TF("$SLID_NotifyTagged", a_name);
+-        RE::DebugNotification(msg.c_str());
++        RE::SendHUDMessage::ShowHUDMessage(msg.c_str());
+ 
+         auto* ref = RE::TESForm::LookupByID<RE::TESObjectREFR>(s_pendingFormID);
+         if (ref) {
+@@ -1154,7 +1154,7 @@
+             // Software keyboard: intercept CharEvents
+             if (event->GetEventType() == RE::INPUT_EVENT_TYPE::kChar) {
+                 auto* charEvent = static_cast<RE::CharEvent*>(event);
+-                Menu::HandleChar(charEvent->keycode);
++                Menu::HandleChar(charEvent->keyCode);
+                 continue;
+             }
+ 
+--- a/src/UIHelper.cpp
++++ b/src/UIHelper.cpp
+@@ -40,14 +40,14 @@
+     msgBoxData->callback = RE::BSTSmartPointer<RE::IMessageBoxCallback>(
+         new CallbackAdapter(std::move(a_callback)));
+ 
+-    msgBoxData->QueueMessage();
++    RE::MessageBoxMenu::QueueMessage(msgBoxData);
+ }
+ 
+ // --- Dismantle Network Flow ---
+ 
+ void UIHelper::BeginDismantleNetwork(RE::TESObjectREFR* a_masterRef) {
+     if (!a_masterRef) {
+-        RE::DebugNotification(T("$SLID_ErrNoTarget").c_str());
++        RE::SendHUDMessage::ShowHUDMessage(T("$SLID_ErrNoTarget").c_str());
+         return;
+     }
+ 
+@@ -56,7 +56,7 @@
+ 
+     auto networkName = mgr->FindNetworkByMaster(formID);
+     if (networkName.empty()) {
+-        RE::DebugNotification(T("$SLID_ErrNotNetworkMaster").c_str());
++        RE::SendHUDMessage::ShowHUDMessage(T("$SLID_ErrNotNetworkMaster").c_str());
+         Feedback::OnError();
+         return;
+     }
+@@ -69,13 +69,13 @@
+                 auto* mgr = NetworkManager::GetSingleton();
+                 if (mgr->RemoveNetwork(networkName)) {
+                     std::string msg = TF("$SLID_NotifyNetworkDestroyed", networkName);
+-                    RE::DebugNotification(msg.c_str());
++                    RE::SendHUDMessage::ShowHUDMessage(msg.c_str());
+                     logger::info("Dismantled network '{}'", networkName);
+                     if (auto* ref = RE::TESForm::LookupByID<RE::TESObjectREFR>(formID)) {
+                         Feedback::OnDismantleNetwork(ref);
+                     }
+                 } else {
+-                    RE::DebugNotification(T("$SLID_ErrDismantleFailed").c_str());
++                    RE::SendHUDMessage::ShowHUDMessage(T("$SLID_ErrDismantleFailed").c_str());
+                     Feedback::OnError();
+                 }
+             });
+--- a/include/UIHelper.h
++++ b/include/UIHelper.h
+@@ -20,7 +20,7 @@
+     class CallbackAdapter : public RE::IMessageBoxCallback {
+     public:
+         CallbackAdapter(Callback a_fn) : m_fn(std::move(a_fn)) {}
+-        void Run(Message a_msg) override {
++        void Run(std::uint8_t a_msg) override {
+             if (m_fn) {
+                 int idx = static_cast<int>(a_msg);
+                 logger::debug("MessageBox callback: index = {}", idx);

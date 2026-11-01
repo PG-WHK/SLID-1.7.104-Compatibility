@@ -1,0 +1,50 @@
+{
+  "binary": "SKSE/Plugins/SLID.dll",
+  "sha256": "6e05061237d7557704132343cf0e9430353dbc8d77126c5d98d28f9db23f2c2a",
+  "size": 1924096,
+  "machine": "AMD64",
+  "upstream": "SLID 1.4.9",
+  "runtime": "Steam 1.7.104.0 only",
+  "skse": "2.3.1+",
+  "address_library_format_5": true,
+  "structure_dependent": true,
+  "exports": [
+    "SKSEPlugin_Load",
+    "SKSEPlugin_Query",
+    "SKSEPlugin_Version"
+  ],
+  "imports": [
+    "KERNEL32.dll",
+    "MSVCP140.dll",
+    "VCRUNTIME140_1.dll",
+    "VCRUNTIME140.dll",
+    "api-ms-win-crt-heap-l1-1-0.dll",
+    "api-ms-win-crt-runtime-l1-1-0.dll",
+    "api-ms-win-crt-math-l1-1-0.dll",
+    "api-ms-win-crt-convert-l1-1-0.dll",
+    "api-ms-win-crt-string-l1-1-0.dll",
+    "api-ms-win-crt-stdio-l1-1-0.dll",
+    "api-ms-win-crt-filesystem-l1-1-0.dll",
+    "api-ms-win-crt-time-l1-1-0.dll",
+    "api-ms-win-crt-locale-l1-1-0.dll",
+    "VERSION.dll",
+    "USER32.dll",
+    "SHELL32.dll",
+    "ole32.dll"
+  ],
+  "papyrus_binding_count": 81,
+  "papyrus_bindings_preserved": true,
+  "pex_function_names_present": true,
+  "wrong_runtime_guard_tests": [
+    "1.6.1170",
+    "1.7.99",
+    "editor",
+    "old SKSE",
+    "null interface"
+  ],
+  "esp_masters": [
+    "Skyrim.esm"
+  ],
+  "esp_esl_flag": true,
+  "game_test": "User-reported pass, 2026-11-01: launch, Link/container setup, filter sorting, save/quit/reload. Not exhaustive."
+}
